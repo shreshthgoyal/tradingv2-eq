@@ -1,0 +1,176 @@
+mode: paper
+timezone: Asia/Kolkata
+mongo:
+  uri: mongodb://localhost:27017
+  database: tradingbot
+portfolio:
+  starting_cash: 100000
+  contribution_amount: 0
+  min_cash_buffer: 5000
+  max_heat: 0.60
+  max_symbol_weight: 0.30
+  max_sector_weight: 0.50
+  cash_buffer: 5000
+  rebalance_frequency: weekly
+  entry_staggering: true
+risk:
+  risk_per_trade_pct: 0.01
+  max_position_weight: 0.30
+  max_sector_weight: 0.50
+  max_portfolio_heat: 0.60
+  max_correlation: 0.80
+  atr_stop_multiplier: 2.0
+strategy:
+  entry_score_threshold: 0.58
+  hold_score_threshold: 0.47
+  time_stop_bars: 30
+  lookback_days:
+    short: 20
+    medium: 63
+    long: 200
+universe:
+  symbols:
+    - HAL
+    - IRCTC
+    - BSE
+  benchmark_symbol: NIFTY 50
+  max_active_positions: 3
+  symbol_profiles:
+    HAL:
+      tags:
+        - dominant_franchise
+        - event_heavy
+      screening:
+        min_turnover_ma_20: 150000000
+        min_delivery_ratio: 30.0
+        max_realized_vol_20d: 0.75
+        max_gap_risk: 0.12
+      strategy:
+        entry_persistence: 4
+        entry_score_offset: 0.0
+        hold_score_offset: 0.0
+        min_breakout_confirmation: 0.62
+        min_pullback_quality: 0.60
+        min_relative_strength: 0.56
+        min_long_trend_quality: 0.64
+        cooldown_days: 18
+        fast_fail_cooldown_days: 30
+        atr_stop_multiplier: 2.6
+        min_hold_days: 8
+    IRCTC:
+      tags:
+        - dominant_franchise
+        - event_heavy
+      screening:
+        min_turnover_ma_20: 70000000
+        min_delivery_ratio: 18.0
+        max_realized_vol_20d: 0.95
+        max_gap_risk: 0.18
+      strategy:
+        entry_persistence: 3
+        entry_score_offset: -0.03
+        hold_score_offset: -0.01
+        min_breakout_confirmation: 0.56
+        min_pullback_quality: 0.54
+        min_relative_strength: 0.48
+        min_long_trend_quality: 0.56
+        cooldown_days: 12
+        fast_fail_cooldown_days: 24
+        atr_stop_multiplier: 2.3
+        min_hold_days: 5
+    BSE:
+      tags:
+        - dominant_franchise
+        - event_heavy
+      screening:
+        min_turnover_ma_20: 90000000
+        min_delivery_ratio: 24.0
+        max_realized_vol_20d: 0.85
+        max_gap_risk: 0.14
+      strategy:
+        entry_persistence: 4
+        entry_score_offset: 0.01
+        hold_score_offset: 0.0
+        min_breakout_confirmation: 0.68
+        min_pullback_quality: 0.62
+        min_relative_strength: 0.57
+        min_long_trend_quality: 0.63
+        cooldown_days: 20
+        fast_fail_cooldown_days: 35
+        atr_stop_multiplier: 2.8
+        min_hold_days: 8
+dashboard:
+  host: 127.0.0.1
+  port: 8000
+screener:
+  base_url: https://www.screener.in/company
+paths:
+  local_eod_dir: data/eod
+  bhavcopy_dir: data/bhavcopy
+research:
+  candidate_set: default
+  train_years: 3
+  test_years: 1
+  start_date:
+  end_date:
+  artifacts_dir: artifacts
+  use_common_start_date: true
+  summary_skill_path: skills/current-system-state.md
+  rejection:
+    min_cagr: 0.0
+    min_sharpe: 0.0
+    min_profit_factor: 1.0
+    max_drawdown: 0.20
+    max_drawdown_duration_days: 120
+    max_turnover: 150.0
+    min_avg_holding_period_days: 5.0
+    max_oos_sharpe_drop_pct: 20.0
+    max_portfolio_heat: 0.60
+    min_trade_count: 5
+  rejection_profiles:
+    hal_single_symbol:
+      min_cagr: 0.0
+      min_sharpe: 0.0
+      min_profit_factor: 1.0
+      max_drawdown: 0.20
+      max_drawdown_duration_days: 9999
+      max_turnover: 150.0
+      min_avg_holding_period_days: 5.0
+      max_oos_sharpe_drop_pct: 20.0
+      max_portfolio_heat: 0.60
+      min_trade_count: 10
+    deployable_three_symbol_benchmark:
+      min_cagr: 0.0
+      min_sharpe: 0.0
+      min_profit_factor: 1.0
+      max_drawdown: 0.20
+      max_drawdown_duration_days: 365
+      max_turnover: 150.0
+      min_avg_holding_period_days: 4.0
+      max_oos_sharpe_drop_pct: 20.0
+      max_portfolio_heat: 0.60
+      min_trade_count: 8
+    portfolio_multi_symbol:
+      min_cagr: 0.0
+      min_sharpe: 0.0
+      min_profit_factor: 1.0
+      max_drawdown: 0.20
+      max_drawdown_duration_days: 120
+      max_turnover: 150.0
+      min_avg_holding_period_days: 5.0
+      max_oos_sharpe_drop_pct: 20.0
+      max_portfolio_heat: 0.60
+      min_trade_count: 15
+costs:
+  brokerage_buy: 0.0
+  brokerage_sell: 0.0
+  stt_buy_bps: 10.0
+  stt_sell_bps: 10.0
+  exchange_txn_bps: 0.307
+  sebi_per_crore: 10.0
+  gst_pct: 18.0
+  stamp_buy_bps: 1.5
+  dp_charge_sell_flat: 13.5
+  slippage_bps: 5.0
+  impact_model: adv_fraction
+  impact_adv_fraction_cap: 0.05

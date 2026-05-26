@@ -1,0 +1,9 @@
+{
+  "name": "tradingbot-screener-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "screener-scraper-pro": "^1.0.0"
+  }
+}

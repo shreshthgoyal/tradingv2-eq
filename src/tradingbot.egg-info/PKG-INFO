@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: tradingbot
+Version: 0.1.0
+Summary: NSE cash equity EOD quant trading system
+Requires-Python: >=3.12
+Requires-Dist: nselib>=2.5.1
+Requires-Dist: nsetools>=2.0.1
+Requires-Dist: pymongo>=4.8.0
+Requires-Dist: PyYAML>=6.0.2

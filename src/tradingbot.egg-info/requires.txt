@@ -1,0 +1,4 @@
+nselib>=2.5.1
+nsetools>=2.0.1
+pymongo>=4.8.0
+PyYAML>=6.0.2
