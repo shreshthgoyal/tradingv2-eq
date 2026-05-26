@@ -161,3 +161,56 @@ class HalMasterStrategyTest(unittest.TestCase):
         self.assertIn("DELIVERY_LOW", actionable[0].soft_blockers)
         self.assertNotIn("LIQUIDITY_LOW", actionable[0].screening_blockers)
         self.assertIn(actionable[0].entry_band, {"high_conviction_entry", "standard_entry", "watchlist_hold"})
+
+    def test_soft_penalty_regime_can_allow_standard_entry(self) -> None:
+        dataset, indicators, regimes, screenings = _hal_dataset()
+        for idx, regime in enumerate(regimes):
+            regime.label = RegimeLabel.BEAR_RANGING
+            regime.degraded_factors = ["benchmark_softening"]
+            indicators[idx].values["returns_20d"] = 0.09
+            indicators[idx].values["relative_strength_63d"] = 0.12
+            indicators[idx].values["breakout_distance"] = 0.065
+
+        engine = MasterStrategyEngine(entry_threshold_floor=0.55, hold_threshold_floor=0.45)
+        signals = engine.evaluate_candidates(
+            dataset=dataset,
+            indicators=indicators,
+            regimes=regimes,
+            screenings=screenings,
+            train_years=3,
+            test_years=1,
+            symbol_profile={
+                "tags": ["dominant_franchise"],
+                "strategy": {
+                    "entry_persistence": 2,
+                    "entry_score_offset": -0.02,
+                    "min_breakout_confirmation": 0.58,
+                },
+            },
+        )["franchise_breakout_confirmed"]
+
+        standard_entries = [signal for signal in signals if signal.entry_band == "standard_entry"]
+        self.assertTrue(standard_entries)
+        self.assertTrue(all(signal.state == "ENTER_PARTIAL" for signal in standard_entries))
+        self.assertTrue(all("REGIME_SOFT_PENALTY" in signal.reasons for signal in standard_entries))
+
+    def test_hard_bearish_regime_still_blocks_entries(self) -> None:
+        dataset, indicators, regimes, screenings = _hal_dataset()
+        for regime in regimes:
+            regime.label = RegimeLabel.BEAR_TRENDING
+            regime.degraded_factors = ["benchmark_breakdown"]
+
+        engine = MasterStrategyEngine(entry_threshold_floor=0.55, hold_threshold_floor=0.45)
+        signals = engine.evaluate_candidates(
+            dataset=dataset,
+            indicators=indicators,
+            regimes=regimes,
+            screenings=screenings,
+            train_years=3,
+            test_years=1,
+            symbol_tags=["dominant_franchise"],
+        )["franchise_breakout_confirmed"]
+
+        self.assertTrue(signals)
+        self.assertTrue(all(signal.state == "REJECT" for signal in signals))
+        self.assertTrue(all("REGIME_UNSUITABLE" in signal.screening_blockers for signal in signals))

@@ -310,9 +310,15 @@ class MasterStrategyEngine:
         entry_start_date = None
         for row in raw_scores:
             entry_threshold, hold_threshold = thresholds_by_date.get(row["trade_date"], (self.entry_threshold_floor, self.hold_threshold_floor))
-            entry_threshold = round(entry_threshold + candidate.get("entry_score_offset", 0.0) + row.get("soft_threshold_bump", 0.0), 3)
+            entry_threshold = round(
+                entry_threshold
+                + candidate.get("entry_score_offset", 0.0)
+                + row.get("soft_threshold_bump", 0.0)
+                + row.get("regime_threshold_bump", 0.0),
+                3,
+            )
             hold_threshold = round(hold_threshold + candidate.get("hold_score_offset", 0.0), 3)
-            supportive = row["screening_pass"] and row["regime_supportive"] and row["composite_score"] >= hold_threshold
+            supportive = row["screening_pass"] and row["regime_state"] != "hard_block" and row["composite_score"] >= hold_threshold
             conviction = supportive and row["entry_quality_ok"] and row["composite_score"] >= entry_threshold
             supportive_streak = supportive_streak + 1 if supportive else 0
             conviction_streak = conviction_streak + 1 if conviction else 0
@@ -335,7 +341,7 @@ class MasterStrategyEngine:
                     state = SignalState.REJECT
                     reasons = row["screening_blockers"] or ["SCREENING_BLOCKED"]
                     threshold = entry_threshold
-            elif not row["regime_supportive"]:
+            elif row["regime_state"] == "hard_block":
                 if in_position:
                     state = SignalState.REDUCE_PARTIAL if tranche_count > 1 else SignalState.EXIT_FULL
                     reasons = ["REGIME_NOT_SUPPORTIVE"]
@@ -350,9 +356,17 @@ class MasterStrategyEngine:
                     reasons = ["REGIME_NOT_SUPPORTIVE"]
                     threshold = entry_threshold
                     entry_blockers = ["REGIME_NOT_SUPPORTIVE"]
-            elif not in_position and not cooldown_active and conviction_streak >= candidate["entry_persistence"] and row["composite_score"] >= entry_threshold:
+            elif (
+                not in_position
+                and not cooldown_active
+                and row["regime_state"] == "fully_supportive"
+                and conviction_streak >= candidate["entry_persistence"]
+                and row["composite_score"] >= entry_threshold
+            ):
                 state = SignalState.ENTER_PARTIAL
                 reasons = ["REGIME_SUPPORTIVE", "SCREENING_PASSED", "SCORE_ABOVE_ENTRY", "HIGH_CONVICTION_ENTRY", "TREND_QUALITY_CONFIRMED"]
+                if row["regime_state"] == "soft_penalty":
+                    reasons.append("REGIME_SOFT_PENALTY")
                 threshold = entry_threshold
                 in_position = True
                 tranche_count = 1
@@ -370,10 +384,15 @@ class MasterStrategyEngine:
                 and not cooldown_active
                 and supportive_streak >= max(2, candidate["entry_persistence"] - 1)
                 and row["entry_quality_ok"]
-                and -0.01 <= score_margin < 0.015
+                and (
+                    0.0 <= score_margin < 0.025
+                    or (row["regime_state"] == "soft_penalty" and 0.0 <= score_margin < 0.30)
+                )
             ):
                 state = SignalState.ENTER_PARTIAL
                 reasons = ["REGIME_SUPPORTIVE", "SCREENING_PASSED", "STANDARD_ENTRY", "SCORE_NEAR_ENTRY"]
+                if row["regime_state"] == "soft_penalty":
+                    reasons.append("REGIME_SOFT_PENALTY")
                 threshold = entry_threshold
                 in_position = True
                 tranche_count = 1
@@ -435,6 +454,7 @@ class MasterStrategyEngine:
                     screening_pass=row["screening_pass"],
                     screening_blockers=list(row["screening_blockers"]),
                     soft_blockers=list(row["soft_blockers"]),
+                    regime_state=row["regime_state"],
                     entry_band=entry_band,
                     entry_blockers=entry_blockers,
                     score_margin=score_margin,
@@ -463,7 +483,14 @@ class MasterStrategyEngine:
         mean_reversion_veto = 0.20 if values.get("distance_to_sma_20", 0.0) > 0.10 else 0.0
         fundamental_quality = min(max((fundamentals.roce + fundamentals.roe) / 60.0, 0.0), 1.0)
         liquidity_gate = min(max(values.get("turnover_ma_20", 0.0) / 500000000.0, 0.0), 1.0)
-        regime_gate = 1.0 if regime and regime.label == RegimeLabel.BULL_TRENDING else 0.7 if regime and regime.label == RegimeLabel.BULL_RANGING else 0.2
+        if regime and regime.label == RegimeLabel.BULL_TRENDING:
+            regime_gate = 1.0
+        elif regime and regime.label == RegimeLabel.BULL_RANGING:
+            regime_gate = 0.78
+        elif regime and regime.label == RegimeLabel.BEAR_RANGING:
+            regime_gate = 0.58
+        else:
+            regime_gate = 0.2
         event_gate = 0.0 if screening and "EVENT_BLACKOUT" in screening.failed_checks else 1.0
         ownership_bias = round((fundamental_quality + long_trend_quality + regime_gate) / 3.0, 3)
         dominant_bonus = 0.12 if "dominant_franchise" in symbol_tags else 0.0
@@ -540,6 +567,8 @@ class MasterStrategyEngine:
         )
         hard_blockers: list[str] = []
         soft_blockers: list[str] = []
+        regime_state = "hard_block"
+        regime_threshold_bump = 0.0
         blocker_classification = {
             "LIQUIDITY_LOW": "soft",
             "DELIVERY_LOW": "soft",
@@ -569,8 +598,24 @@ class MasterStrategyEngine:
             soft_blockers.append("VOLATILITY_EXTREME")
         if not gap_ok and "GAP_RISK_HIGH" not in soft_blockers:
             soft_blockers.append("GAP_RISK_HIGH")
-        if regime and regime.label not in {RegimeLabel.BULL_TRENDING, RegimeLabel.BULL_RANGING} and "REGIME_UNSUITABLE" not in hard_blockers:
-            hard_blockers.append("REGIME_UNSUITABLE")
+        if regime:
+            if regime.label == RegimeLabel.BULL_TRENDING:
+                regime_state = "fully_supportive"
+            elif regime.label == RegimeLabel.BULL_RANGING:
+                regime_state = "soft_penalty"
+                regime_threshold_bump = 0.01
+            elif regime.label == RegimeLabel.BEAR_RANGING and regime.confidence >= 0.55:
+                regime_state = "soft_penalty"
+                regime_threshold_bump = 0.02
+            else:
+                regime_state = "hard_block"
+        if regime_state == "hard_block":
+            if "REGIME_UNSUITABLE" not in hard_blockers:
+                hard_blockers.append("REGIME_UNSUITABLE")
+        elif "REGIME_UNSUITABLE" in hard_blockers:
+            hard_blockers = [failure for failure in hard_blockers if failure != "REGIME_UNSUITABLE"]
+            if "REGIME_UNSUITABLE" not in soft_blockers:
+                soft_blockers.append("REGIME_UNSUITABLE")
         screening_pass = len(hard_blockers) == 0
         screening_failures = hard_blockers + [item for item in soft_blockers if item not in hard_blockers]
         soft_threshold_bump = round(0.01 * len(soft_blockers), 3)
@@ -602,7 +647,9 @@ class MasterStrategyEngine:
             "hold_quality_ok": hold_quality_ok,
             "partial_profit_ready": partial_profit_ready,
             "extended_for_add": values.get("distance_to_sma_20", 0.0) > candidate["max_add_extension"],
-            "regime_supportive": bool(regime and regime.label in {RegimeLabel.BULL_TRENDING, RegimeLabel.BULL_RANGING}),
+            "regime_supportive": regime_state != "hard_block",
+            "regime_state": regime_state,
+            "regime_threshold_bump": regime_threshold_bump,
             "screening_investable": bool(screening and screening.investable),
             "screening_pass": screening_pass,
             "screening_blockers": hard_blockers,

@@ -69,6 +69,16 @@ class RunStateSummaryTest(unittest.TestCase):
             "trade_conversion_rates_text": "HAL:0.55, IRCTC:0.00, BSE:0.21",
             "hard_risk_exit_rates_text": "HAL:0.40, IRCTC:0.00, BSE:0.67",
             "profile_overrides_text": "HAL:strict_quality; IRCTC:relaxed_screening; BSE:strict_breakout",
+            "baseline_comparison": {
+                "cash_idle_pct_delta": -0.12,
+                "days_with_any_position_pct_delta": 0.08,
+                "days_with_2plus_positions_pct_delta": 0.02,
+                "avg_holding_period_days_delta": 4.5,
+                "gross_edge_delta": 0.03,
+                "net_edge_delta": 0.01,
+                "hard_risk_exit_rate_delta": -0.22,
+                "selector_mix_delta_text": "pullback down, breakout up",
+            },
             "thresholds": {
                 "entry_score_threshold": 0.55,
                 "hold_score_threshold": 0.45,
@@ -159,6 +169,8 @@ class RunStateSummaryTest(unittest.TestCase):
         self.assertIn("Allocator blocker leaderboard", text)
         self.assertIn("Screening pass rates", text)
         self.assertIn("Active per-symbol overrides", text)
+        self.assertIn("Baseline Comparison", text)
+        self.assertIn("pullback down, breakout up", text)
 
     def test_failed_run_state_summary_marks_run_as_failed(self) -> None:
         summary = build_failed_run_state_summary(

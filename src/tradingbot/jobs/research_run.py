@@ -5,6 +5,7 @@ import itertools
 from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
+import re
 
 from tradingbot.backtest.engine import CandidateResearchEngine
 from tradingbot.backtest.execution import BacktestExecutionAssumptions, RejectionProfile
@@ -197,6 +198,17 @@ def write_run_state_summary(path: Path, summary: dict) -> None:
         f"- Trade conversion rates: `{summary.get('trade_conversion_rates_text', '')}`",
         f"- Hard-risk exit rates: `{summary.get('hard_risk_exit_rates_text', '')}`",
         f"- Active per-symbol overrides: `{summary.get('profile_overrides_text', '')}`",
+        f"- Deployment bottleneck: `{summary.get('deployment_constraint', 'unknown')}`",
+        "",
+        "## Baseline Comparison",
+        f"- Cash idle delta: `{summary.get('baseline_comparison', {}).get('cash_idle_pct_delta', 0.0):.6f}`",
+        f"- Days with any position delta: `{summary.get('baseline_comparison', {}).get('days_with_any_position_pct_delta', 0.0):.6f}`",
+        f"- Days with 2+ positions delta: `{summary.get('baseline_comparison', {}).get('days_with_2plus_positions_pct_delta', 0.0):.6f}`",
+        f"- Avg holding period delta: `{summary.get('baseline_comparison', {}).get('avg_holding_period_days_delta', 0.0):.6f}`",
+        f"- Gross edge delta: `{summary.get('baseline_comparison', {}).get('gross_edge_delta', 0.0):.6f}`",
+        f"- Net edge delta: `{summary.get('baseline_comparison', {}).get('net_edge_delta', 0.0):.6f}`",
+        f"- Hard-risk exit rate delta: `{summary.get('baseline_comparison', {}).get('hard_risk_exit_rate_delta', 0.0):.6f}`",
+        f"- Selector mix delta: `{summary.get('baseline_comparison', {}).get('selector_mix_delta_text', 'n/a')}`",
         "",
         "## Period Highlights",
         _period_line("weekly", "Latest week"),
@@ -212,7 +224,29 @@ def write_run_state_summary(path: Path, summary: dict) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def build_run_state_summary(result, symbols: list[str], config=None) -> dict:
+def _parse_previous_run_state_summary(path: Path) -> dict[str, float] | None:
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8")
+
+    def extract(label: str) -> float | None:
+        match = re.search(rf"- {re.escape(label)}: `(-?\d+(?:\.\d+)?)`", text)
+        return float(match.group(1)) if match else None
+
+    metrics = {
+        "cash_idle_pct": extract("Cash idle %"),
+        "days_with_any_position_pct": extract("Days with any position %"),
+        "days_with_2plus_positions_pct": extract("Days with 2+ positions %"),
+        "avg_holding_period_days": extract("Avg holding period days"),
+        "gross_cagr_proxy": extract("Gross CAGR proxy"),
+        "cagr": extract("CAGR"),
+    }
+    if all(value is None for value in metrics.values()):
+        return None
+    return {key: value for key, value in metrics.items() if value is not None}
+
+
+def build_run_state_summary(result, symbols: list[str], config=None, previous_summary: dict | None = None) -> dict:
     metrics = result.summary.metrics
     requested_start_date = result.dataset_report.get("requested_start_date")
     effective_start_date = result.dataset_report.get("effective_portfolio_start_date", requested_start_date)
@@ -302,10 +336,20 @@ def build_run_state_summary(result, symbols: list[str], config=None) -> dict:
         symbol: payload.get("hard_risk_exit_rate", 0.0)
         for symbol, payload in symbol_health.items()
     }
+    strategy_deployment_summary = result.dataset_report.get("strategy_deployment_summary", {})
     profile_overrides = {
         symbol: ("strict_quality" if symbol == "HAL" else "relaxed_screening" if symbol == "IRCTC" else "strict_breakout" if symbol == "BSE" else "default")
         for symbol in symbols
     }
+    previous_metrics = previous_summary or {}
+    gross_edge_delta = metrics.get("gross_cagr_proxy", 0.0) - previous_metrics.get("gross_cagr_proxy", metrics.get("gross_cagr_proxy", 0.0))
+    net_edge_delta = metrics.get("cagr", 0.0) - previous_metrics.get("cagr", metrics.get("cagr", 0.0))
+    dominant_entry_blocker = next(iter(sorted(entry_blockers.items(), key=lambda item: item[1], reverse=True)), ("unknown", 0))[0]
+    deployment_constraint = "gross_edge_protection"
+    if dominant_entry_blocker == "REGIME_UNSUITABLE":
+        deployment_constraint = "screening"
+    elif selected_strategy_mix.get("franchise_pullback_accumulator", 0.0) > 0.70 and metrics.get("gross_cagr_proxy", 0.0) <= 0:
+        deployment_constraint = "selector_quality"
     symbol_recommendations_map = complete_symbol_recommendations
     return {
         "run_timestamp": datetime.now().astimezone().isoformat(),
@@ -369,6 +413,18 @@ def build_run_state_summary(result, symbols: list[str], config=None) -> dict:
         "trade_conversion_rates_text": ", ".join(f"{symbol}:{value:.2f}" for symbol, value in trade_conversion_rates.items()),
         "hard_risk_exit_rates_text": ", ".join(f"{symbol}:{value:.2f}" for symbol, value in hard_risk_exit_rates.items()),
         "profile_overrides_text": "; ".join(f"{symbol}:{profile_overrides[symbol]}" for symbol in symbols),
+        "strategy_deployment_summary": strategy_deployment_summary,
+        "deployment_constraint": deployment_constraint,
+        "baseline_comparison": {
+            "cash_idle_pct_delta": round(metrics.get("cash_idle_pct", 0.0) - previous_metrics.get("cash_idle_pct", metrics.get("cash_idle_pct", 0.0)), 6),
+            "days_with_any_position_pct_delta": round(metrics.get("days_with_any_position_pct", 0.0) - previous_metrics.get("days_with_any_position_pct", metrics.get("days_with_any_position_pct", 0.0)), 6),
+            "days_with_2plus_positions_pct_delta": round(metrics.get("days_with_2plus_positions_pct", 0.0) - previous_metrics.get("days_with_2plus_positions_pct", metrics.get("days_with_2plus_positions_pct", 0.0)), 6),
+            "avg_holding_period_days_delta": round(metrics.get("avg_holding_period_days", 0.0) - previous_metrics.get("avg_holding_period_days", metrics.get("avg_holding_period_days", 0.0)), 6),
+            "gross_edge_delta": round(gross_edge_delta, 6),
+            "net_edge_delta": round(net_edge_delta, 6),
+            "hard_risk_exit_rate_delta": 0.0,
+            "selector_mix_delta_text": "n/a",
+        },
         "thresholds": {
             "entry_score_threshold": getattr(getattr(config, "strategy", None), "entry_score_threshold", 0.0),
             "hold_score_threshold": getattr(getattr(config, "strategy", None), "hold_score_threshold", 0.0),
@@ -497,6 +553,7 @@ def main() -> None:
     start_date = _parse_date(args.start_date) or _parse_date(config.research.start_date) or date(2016, 1, 1)
     date_range = ResearchDateRange(start_date=start_date, end_date=end_date)
     summary_skill_path = Path(config.research.summary_skill_path)
+    previous_summary = _parse_previous_run_state_summary(summary_skill_path)
 
     try:
         nse_adapter = NseLibAdapter()
@@ -680,7 +737,7 @@ def main() -> None:
 
         artifact_root = Path(args.artifacts_dir or config.research.artifacts_dir)
         manifest = ArtifactExporter(artifact_root).export(result)
-        state_summary = build_run_state_summary(result, symbols, config=config)
+        state_summary = build_run_state_summary(result, symbols, config=config, previous_summary=previous_summary)
         write_run_state_summary(summary_skill_path, state_summary)
         label = symbols[0] if len(symbols) == 1 else ",".join(symbols)
         print(f"Research run complete for {label}")

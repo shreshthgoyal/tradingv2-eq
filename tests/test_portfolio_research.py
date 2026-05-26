@@ -5,8 +5,9 @@ from pathlib import Path
 
 from tradingbot.backtest.engine import CandidateResearchEngine
 from tradingbot.backtest.execution import BacktestExecutionAssumptions, RejectionProfile
-from tradingbot.core.enums import PeriodType, RegimeLabel
+from tradingbot.core.enums import CandidateStatus, PeriodType, RegimeLabel
 from tradingbot.core.models import (
+    CandidateEvaluation,
     FundamentalSnapshot,
     HistoricalFundamentalPoint,
     HistoricalPriceBar,
@@ -506,6 +507,66 @@ class PortfolioResearchTest(unittest.TestCase):
         )
         self.assertTrue(result.signals)
         self.assertNotEqual(result.signals[0]["selected_strategy"], "franchise_seasonality_enabled")
+
+    def test_selector_penalizes_pullback_when_breakout_is_actionable_and_pullback_edge_is_weak(self) -> None:
+        hal = _dataset("HAL", 0.55)
+        engine = CandidateResearchEngine(
+            BacktestExecutionAssumptions(max_active_positions=1),
+            hal_rejection_profile=RejectionProfile(min_trade_count=1, max_drawdown_duration_days=9999),
+            portfolio_rejection_profile=RejectionProfile(min_trade_count=20, max_drawdown_duration_days=120),
+        )
+        trade_date = hal[1][2].trade_date
+        breakout_signal = _selector_signals("HAL", hal[1], "breakout")[2]
+        pullback_signal = _selector_signals("HAL", hal[1], "pullback")[2]
+        pullback_signal.state = "ENTER_PARTIAL"
+        pullback_signal.entry_band = "high_conviction_entry"
+        pullback_signal.score_margin = 0.03
+        breakout_signal.state = "ENTER_PARTIAL"
+        breakout_signal.entry_band = "standard_entry"
+        breakout_signal.score_margin = 0.012
+
+        candidate_evaluations = {
+            "franchise_breakout_confirmed": CandidateEvaluation(
+                name="franchise_breakout_confirmed",
+                status=CandidateStatus.ACCEPTED,
+                rejection_reasons=[],
+                enabled_modules=[],
+                disabled_modules=[],
+                effective_start_date=trade_date,
+                oos_summary={},
+                is_summary={},
+                metrics={"gross_profit_factor": 1.2},
+                window_metrics=[],
+                symbol_recommendations={"HAL": {"gross_contribution": 200.0, "hard_risk_exit_rate": 0.2}},
+            ),
+            "franchise_pullback_accumulator": CandidateEvaluation(
+                name="franchise_pullback_accumulator",
+                status=CandidateStatus.ACCEPTED,
+                rejection_reasons=[],
+                enabled_modules=[],
+                disabled_modules=[],
+                effective_start_date=trade_date,
+                oos_summary={},
+                is_summary={},
+                metrics={"gross_profit_factor": 0.7},
+                window_metrics=[],
+                symbol_recommendations={"HAL": {"gross_contribution": -150.0, "hard_risk_exit_rate": 0.9}},
+            ),
+        }
+
+        selected = engine._select_adaptive_strategy(
+            {
+                "franchise_breakout_confirmed": breakout_signal,
+                "franchise_pullback_accumulator": pullback_signal,
+            },
+            candidate_evaluations,
+            position=None,
+            bar=hal[0].price_bars[2],
+        )
+
+        self.assertEqual(selected["selected_strategy"], "franchise_breakout_confirmed")
+        self.assertEqual(selected["candidate_actionability_rank"][1]["candidate"], "franchise_pullback_accumulator")
+        self.assertEqual(selected["candidate_actionability_rank"][1]["rejection_reason"], "pullback_gross_edge_penalty")
 
     def test_three_symbol_adaptive_run_exports_period_summaries(self) -> None:
         hal = _dataset("HAL", 0.55)

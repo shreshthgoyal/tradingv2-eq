@@ -205,6 +205,7 @@ class SignalObservation:
     screening_pass: bool = False
     screening_blockers: list[str] = field(default_factory=list)
     soft_blockers: list[str] = field(default_factory=list)
+    regime_state: str = "hard_block"
     entry_band: str | None = None
     entry_blockers: list[str] = field(default_factory=list)
     score_margin: float = 0.0

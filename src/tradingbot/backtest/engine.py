@@ -967,12 +967,13 @@ class CandidateResearchEngine:
                     "selection_confidence": selector["selection_confidence"],
                     "selected_score_margin": selector.get("selected_score_margin", round(getattr(selected_signal, "score_margin", 0.0), 6)),
                     "candidate_actionability_rank": selector.get("candidate_actionability_rank", []),
-                    "signal_state": str(getattr(selected_signal, "state", "REJECT")),
+                    "signal_state": selector.get("selected_signal_state", str(getattr(selected_signal, "state", "REJECT"))),
                     "candidate_reason_codes": list(getattr(selected_signal, "reasons", [])),
                     "composite_score": getattr(selected_signal, "composite_score", 0.0),
                     "screening_pass": getattr(selected_signal, "screening_pass", False),
                     "screening_blockers": list(getattr(selected_signal, "screening_blockers", [])),
                     "soft_blockers": list(getattr(selected_signal, "soft_blockers", [])),
+                    "regime_state": getattr(selected_signal, "regime_state", "hard_block"),
                     "entry_band": getattr(selected_signal, "entry_band", "reject"),
                     "entry_blockers": list(getattr(selected_signal, "entry_blockers", [])),
                     "exit_policy": exit_policy,
@@ -1362,12 +1363,13 @@ class CandidateResearchEngine:
                         "selection_confidence": selector["selection_confidence"],
                         "selected_score_margin": selector.get("selected_score_margin", round(getattr(selected_signal, "score_margin", 0.0), 6)),
                         "candidate_actionability_rank": selector.get("candidate_actionability_rank", []),
-                        "signal_state": str(getattr(selected_signal, "state", "REJECT")),
+                        "signal_state": selector.get("selected_signal_state", str(getattr(selected_signal, "state", "REJECT"))),
                         "candidate_reason_codes": list(getattr(selected_signal, "reasons", [])),
                         "composite_score": getattr(selected_signal, "composite_score", 0.0),
                         "screening_pass": getattr(selected_signal, "screening_pass", False),
                         "screening_blockers": list(getattr(selected_signal, "screening_blockers", [])),
                         "soft_blockers": list(getattr(selected_signal, "soft_blockers", [])),
+                        "regime_state": getattr(selected_signal, "regime_state", "hard_block"),
                         "entry_band": getattr(selected_signal, "entry_band", "reject"),
                         "entry_blockers": list(getattr(selected_signal, "entry_blockers", [])),
                         "exit_policy": exit_policy,
@@ -1584,6 +1586,7 @@ class CandidateResearchEngine:
                     for symbol, payload in symbol_recommendations.items()
                 },
                 "symbol_health_diagnostics": symbol_recommendations,
+                "strategy_deployment_summary": self._strategy_deployment_summary(signal_rows, trades),
                 "module_decisions": {
                     "event_drift": {
                         "enabled": any(row["selected_strategy"] == "franchise_event_drift" for row in signal_rows),
@@ -1656,6 +1659,36 @@ class CandidateResearchEngine:
             return "HOLD_WEAKNESS", "soft"
         return "HOLD_CORE", "none"
 
+    def _candidate_symbol_penalty(self, candidate_name: str, candidate_evaluations: dict[str, CandidateEvaluation], symbol: str) -> tuple[float, str | None]:
+        evaluation = candidate_evaluations.get(candidate_name)
+        if evaluation is None:
+            return 0.0, None
+        symbol_payload = evaluation.symbol_recommendations.get(symbol, {})
+        hard_risk_exit_rate = float(symbol_payload.get("hard_risk_exit_rate", 0.0))
+        gross_contribution = float(symbol_payload.get("gross_contribution", 0.0))
+        penalties: list[tuple[float, str]] = []
+        if candidate_name == "franchise_pullback_accumulator" and gross_contribution < 0:
+            penalties.append((0.6, "pullback_gross_edge_penalty"))
+        if hard_risk_exit_rate >= 0.65:
+            penalties.append((0.4, "hard_risk_exit_penalty"))
+        if not penalties:
+            return 0.0, None
+        penalty_value, reason = max(penalties, key=lambda item: item[0])
+        return penalty_value, reason
+
+    def _signal_is_actionable(self, signal, position: dict | None) -> bool:
+        signal_state = str(getattr(signal, "state", "REJECT"))
+        entry_band = getattr(signal, "entry_band", None)
+        if signal_state == "ENTER_PARTIAL":
+            return position is None and entry_band in {None, "high_conviction_entry", "standard_entry"}
+        if signal_state == "ADD_PARTIAL":
+            return position is not None and entry_band in {None, "high_conviction_entry"}
+        if signal_state == "HOLD":
+            return position is not None
+        if signal_state in {"REDUCE_PARTIAL", "EXIT_FULL"}:
+            return position is not None
+        return False
+
     def _can_add_position(self, position: dict, signal, bar) -> bool:
         if len(position["open_trade_indexes"]) >= 2:
             return False
@@ -1675,22 +1708,27 @@ class CandidateResearchEngine:
         pullback = candidate_signals.get("franchise_pullback_accumulator")
         risk = candidate_signals.get("franchise_risk_managed")
         event = candidate_signals.get("franchise_event_drift")
-        ranked_candidates: list[tuple[tuple[float, float, float, float], str, object, str]] = []
+        ranked_candidates: list[tuple[tuple[float, float, float, float, float], str, object, str, str | None]] = []
+        symbol = getattr(bar, "symbol", None)
 
         def add_rank(candidate_name: str, signal, reason: str, preference_weight: float) -> None:
             if signal is None:
                 return
+            penalty_value, rejection_reason = self._candidate_symbol_penalty(candidate_name, candidate_evaluations, symbol)
+            actionable = self._signal_is_actionable(signal, position)
             ranked_candidates.append(
                 (
                     (
-                        float(self._signal_state_priority(str(getattr(signal, "state", "REJECT")))),
-                        float(self._entry_band_priority(getattr(signal, "entry_band", "reject"))),
+                        1.0 if actionable else 0.0,
+                        preference_weight - penalty_value,
                         float(getattr(signal, "score_margin", 0.0)),
-                        preference_weight,
+                        float(self._entry_band_priority(getattr(signal, "entry_band", "reject"))),
+                        float(self._signal_state_priority(str(getattr(signal, "state", "REJECT")))),
                     ),
                     candidate_name,
                     signal,
                     reason,
+                    rejection_reason,
                 )
             )
 
@@ -1706,11 +1744,18 @@ class CandidateResearchEngine:
             add_rank("franchise_event_drift", event, "bounded_event_window", 1.05)
         if breakout is not None and getattr(breakout, "module_scores", {}).get("breakout_confirmation", 0.0) >= 0.62 and getattr(breakout, "module_scores", {}).get("relative_strength", 0.0) >= 0.55 and str(getattr(breakout, "state", "REJECT")) != "REJECT":
             add_rank("franchise_breakout_confirmed", breakout, "high_breakout_confirmation", 1.0)
-        if pullback is not None and getattr(pullback, "module_scores", {}).get("pullback", 0.0) >= 0.60 and getattr(pullback, "module_scores", {}).get("long_trend_quality", 0.0) >= 0.60 and str(getattr(pullback, "state", "REJECT")) != "REJECT":
+        if (
+            pullback is not None
+            and getattr(pullback, "module_scores", {}).get("pullback", 0.0) >= 0.66
+            and getattr(pullback, "module_scores", {}).get("long_trend_quality", 0.0) >= 0.64
+            and getattr(pullback, "module_scores", {}).get("relative_strength", 0.0) >= 0.60
+            and str(getattr(pullback, "state", "REJECT")) != "REJECT"
+        ):
             add_rank("franchise_pullback_accumulator", pullback, "constructive_pullback_in_trend", 0.95)
-        if ranked_candidates:
-            ranked_candidates.sort(key=lambda item: item[0], reverse=True)
-            _, selected_name, selected_signal, selection_reason = ranked_candidates[0]
+        actionable_candidates = [item for item in ranked_candidates if item[0][0] > 0]
+        if actionable_candidates:
+            actionable_candidates.sort(key=lambda item: item[0], reverse=True)
+            _, selected_name, selected_signal, selection_reason, _ = actionable_candidates[0]
             return {
                 "selected_strategy": selected_name,
                 "signal": selected_signal,
@@ -1730,8 +1775,9 @@ class CandidateResearchEngine:
                         "signal_state": str(getattr(signal, "state", "REJECT")),
                         "entry_band": getattr(signal, "entry_band", "reject"),
                         "score_margin": round(getattr(signal, "score_margin", 0.0), 6),
+                        "rejection_reason": rejection_reason,
                     }
-                    for _, candidate_name, signal, _ in ranked_candidates
+                    for _, candidate_name, signal, _, rejection_reason in actionable_candidates + [item for item in ranked_candidates if item[0][0] <= 0]
                 ],
             }
         fallback_order = [
@@ -1744,7 +1790,7 @@ class CandidateResearchEngine:
             (
                 candidate_name
                 for candidate_name in fallback_order
-                if candidate_name in candidate_signals and str(getattr(candidate_signals[candidate_name], "state", "REJECT")) != "REJECT"
+                if candidate_name in candidate_signals and self._signal_is_actionable(candidate_signals[candidate_name], position)
             ),
             None,
         )
@@ -1754,17 +1800,19 @@ class CandidateResearchEngine:
                 (
                     candidate_name
                     for candidate_name in [most_promising, *candidate_signals.keys()]
-                    if candidate_name and candidate_name != "franchise_seasonality_enabled"
+                    if candidate_name and candidate_name != "franchise_seasonality_enabled" and self._signal_is_actionable(candidate_signals[candidate_name], position)
                 ),
                 next(iter(candidate_signals.keys())),
             )
+        fallback_signal = candidate_signals[fallback_name]
+        fallback_actionable = self._signal_is_actionable(fallback_signal, position)
         return {
             "selected_strategy": fallback_name,
-            "signal": candidate_signals[fallback_name],
+            "signal": fallback_signal,
             "selection_reason": "fallback_to_most_promising_candidate",
             "selection_confidence": 0.5,
-            "selected_signal_state": str(getattr(candidate_signals[fallback_name], "state", "REJECT")),
-            "selected_score_margin": round(getattr(candidate_signals[fallback_name], "score_margin", 0.0), 6),
+            "selected_signal_state": str(getattr(fallback_signal, "state", "REJECT")) if fallback_actionable else "REJECT",
+            "selected_score_margin": round(getattr(fallback_signal, "score_margin", 0.0), 6) if fallback_actionable else 0.0,
             "candidate_actionability_rank": [],
         }
 
@@ -2093,3 +2141,31 @@ class CandidateResearchEngine:
                 "hard_risk_exit_rate": round(hard_risk_exits / len(closed), 6) if closed else 0.0,
             }
         return recommendations
+
+    def _strategy_deployment_summary(self, signal_rows: list[dict], trades: list[BacktestTrade]) -> dict[str, dict[str, float]]:
+        summary: dict[str, dict[str, float]] = {}
+        by_strategy_signals: dict[str, list[dict]] = defaultdict(list)
+        for row in signal_rows:
+            by_strategy_signals[row.get("selected_strategy", "unknown")].append(row)
+        by_strategy_trades: dict[str, list[BacktestTrade]] = defaultdict(list)
+        for trade in trades:
+            strategy_name = trade.decision.get("selected_strategy", "unknown")
+            by_strategy_trades[strategy_name].append(trade)
+        for strategy_name in sorted(set(by_strategy_signals) | set(by_strategy_trades)):
+            strategy_signals = by_strategy_signals.get(strategy_name, [])
+            strategy_trades = [trade for trade in by_strategy_trades.get(strategy_name, []) if trade.exit_date is not None]
+            actionable = [
+                row
+                for row in strategy_signals
+                if row.get("signal_state") in {"ENTER_PARTIAL", "ADD_PARTIAL", "HOLD"}
+            ]
+            hard_risk_exits = sum(1 for trade in strategy_trades if trade.decision.get("exit_policy") == "EXIT_ON_HARD_RISK")
+            summary[strategy_name] = {
+                "signal_count": float(len(strategy_signals)),
+                "actionable_signal_rate": round(len(actionable) / len(strategy_signals), 6) if strategy_signals else 0.0,
+                "gross_contribution": round(sum(trade.gross_pnl for trade in strategy_trades), 6),
+                "net_contribution": round(sum(trade.pnl for trade in strategy_trades), 6),
+                "hard_risk_exit_rate": round(hard_risk_exits / len(strategy_trades), 6) if strategy_trades else 0.0,
+                "avg_holding_period_days": round(sum(trade.holding_period_days for trade in strategy_trades) / len(strategy_trades), 6) if strategy_trades else 0.0,
+            }
+        return summary
